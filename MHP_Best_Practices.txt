@@ -296,7 +296,7 @@ Before-Save Record-Triggered Flow:
 After-Save Record-Triggered Flow:
   Use for creating or updating related records, sending notifications, or calling
   subflows when the committed record ID is required. More expensive than before-save.
-  Avoid on objects that also have Apex triggers handling the same event.
+  Avoid on objects that also have Apex triggers handling the same event if possible.
 
 Scheduled Flow:
   Use for time-based automation: expiration alerts, reminders, nightly syncs.
@@ -392,11 +392,10 @@ a scheduled flow queries every record of that type.
 Only one version of a flow can be active at a time. Old inactive versions
 accumulate and must be cleaned up.
 
-  - Delete all inactive versions after confirming a new version is stable
+  - Delete all inactive versions older than 6 months after confirming a new version is stable
     in production
   - Never delete an active version
-  - Treat each version bump as a deployment: test in sandbox, deploy, confirm,
-    then delete old versions
+  - Treat each version bump as a deployment: test in sandbox, deploy, confirm.
   - Each version must have version notes summarizing what changed
 
 
@@ -490,7 +489,7 @@ Profiles define the minimum baseline access for a user type. Permission sets
 grant additional access on top of the profile. Never expand access via a profile
 when a permission set can do the job. Do not create custom profiles -- use the
 standard Salesforce profiles as baselines and layer permission sets for all
-role-specific access.
+role-specific access as needed. Use Permission Set Groups if applicable.
 
 Permission sets in this org:
   Meridian_Care_Manager          Full CRUD (no delete) on clinical objects
@@ -619,7 +618,7 @@ when the data is present.
 
 When a new field is added to an object that is used in custom report types, the
 field must be manually added to those report types. This does not happen
-automatically.
+automatically. Don't try to add new fields to report types with over 1000 fields.
 
 Key report types to maintain:
   Patient with Risk Assessments           Patient__c -> RiskAssessment__c
@@ -655,9 +654,12 @@ Key report types to maintain:
 ================================================================================
 
 9.1 Sandbox Strategy
+  - If there is any ambiguity in the request, confirm with the user before deploying 
+    to Sandbox to keep from doing extra or irreversible work. 
+  - Tell the user your plan before deploying to sandbox every time.
 
-AsokaDev (Developer Pro)   Primary development sandbox. All changes deploy here first.
-asokatest                  Integration and QA sandbox. Used for user acceptance testing
+(Dev or Developer Pro)   Primarily develop in sandbox. All changes deploy here first. 
+(Dev or Developer Pro)   Integration and QA sandbox. Used for user acceptance testing
                            and when AsokaDev is unavailable.
 Production                 Sysadmin approval required for all deployments.
 
@@ -680,11 +682,10 @@ Every deployment to production must satisfy all of the following:
 
 9.3 Validation Rule Deployment
 
-Validation rules are best deployed through Setup > Object Manager when Metadata
-API deployment is unreliable. If deploying via Salesforce CLI, use the
---target-org flag pointing to a fully authenticated org. Always verify in the
-target org's Setup that the rule is active after deployment.
-
+  - Always ask which users or profiles the Validation Rule should apply to
+  - Does this need to apply to records starting now and forward? Give some examples of date
+    fields to choose when to start the rule
+  - Does this need a backfill of data to make sure records aren't accidentally locked on deployment?
 
 ================================================================================
 10. NAMING CONVENTIONS & DESCRIPTION REQUIREMENTS
@@ -1014,6 +1015,8 @@ Apex class or trigger deletion:
   - Bulk data operations (close, update, archive) with audit reports before executing
   - Identifying data quality and code quality issues
   - Iterating on deployments based on feedback
+  - When given a vague response, always ask for clarification before acting
+  - If given the 
 
 Every Asoka deployment must include:
   - A test class for any new Apex class, in the same deployment package
@@ -1022,19 +1025,27 @@ Every Asoka deployment must include:
   - Populated Description fields on all artifacts (see Section 10)
 
 
-17.2 Standard Questions to Answer Before Submitting a Request
+17.2 Standard Questions to Answer Before working on a solution in the sandbox:
 
 Answering these upfront prevents unnecessary back-and-forth:
 
   - Which profiles or roles should have access to the new feature?
   - Should new fields appear on a page layout? Which one?
   - What is the notification mechanism -- Task, Email, or Chatter?
+  - If working with picklist fields, show the values of the field that are active
   - Should automation apply to all records or a specific subset?
   - What status conditions gate the automation (if any)?
   - Should automation fire on create, update, or both?
   - What should happen if an expected related record (e.g., Care Manager) is missing?
   - Should the change apply to all record types or specific ones?
 
+17.3 How Asoka Acts:
+
+  - Asoka is a proactive but cautious system administrator
+  - Voice: speaks conversationally about Salesforce with stakeholders without extra technical jargon
+  - Organizational security is the most important thing for Asoka
+  - Asoka respects OWD and least-privilege access depending on the user it's interacting with
+  - Asoka puts all data requests into a Salesforce report if possible, csv for >2000 records 
 
 ================================================================================
 Meridian Health Partners -- Salesforce Best Practices v2.0 -- April 2026
