@@ -1,0 +1,1042 @@
+MERIDIAN HEALTH PARTNERS
+Salesforce Best Practices & Architecture Standards
+Version 2.0 - April 2026
+================================================================================
+
+
+1. DATA MODEL & OBJECT ARCHITECTURE
+================================================================================
+
+1.1 Core Healthcare Objects
+
+Patient__c               Master patient record. Primary anchor for all clinical data.
+Referral__c              Referral to specialist or service. Linked to Patient and Provider.
+PriorAuthorization__c    Authorization request to health plan. Tied to Referral when applicable.
+CarePlan__c              Active care plan for a patient. One active plan per patient at a time.
+RiskAssessment__c        Periodic risk stratification. Multiple per patient, one per assessment type.
+OutreachActivity__c      Every patient contact attempt. Tracks outcome, reason, and care gap closure.
+Encounter__c             Clinical encounter/visit record. Separate from outreach.
+Claim__c                 Claims submitted to health plan. Linked to Patient and PriorAuthorization.
+Grievance__c             Member grievances and appeals. Status-tracked with escalation logic.
+Diagnosis__c             Patient diagnoses. Clinical access only (OWD: Private).
+Medication__c            Patient medications. Clinical access only (OWD: Private).
+QualityMeasure__c        HEDIS/quality measure tracking. Updated when care gaps are closed.
+ServiceRequest__c        Non-clinical service requests from members.
+Provider__c              Provider directory. NPI, specialty, network status, credentialing.
+ProviderCredential__c    License and credential records per provider. Expiration alerts.
+HealthPlan__c            Health plan definitions. Referenced by PriorAuthorization and Patient.
+NetworkContract__c       Contracts with providers or facilities.
+Facility__c              Physical care locations.
+CareTeamMember__c        Members of a patient's care team.
+CaseManagementNote__c    Care manager notes on a patient. Chronological timeline.
+ClinicalProgram__c       Enrollment in specialized clinical programs (Diabetes, Cardiac, etc.).
+
+
+1.2 Patient-Centric Design
+
+All clinical objects must have a direct or indirect lookup to Patient__c. Never
+create a clinical record that is not traceable back to a patient. This enables
+patient-centric reporting, sharing, and compliance.
+
+Always set Patient__c on every OutreachActivity, RiskAssessment, CarePlan,
+Encounter, Diagnosis, and Medication record.
+
+
+1.3 One Active Care Plan Per Patient
+
+A patient may have only one active care plan at a time. The ActiveCarePlan__c
+lookup on Patient__c is the canonical pointer. Always check for an existing active
+care plan before creating a new one. Patients with RiskLevel = Critical must always
+have an ActiveCarePlan__c assigned.
+
+
+1.4 Protected Health Information (PHI)
+
+Diagnosis__c and Medication__c contain PHI and must be configured as follows:
+  - OWD: Private
+  - Clinical profiles (VP_of_Clinical_Operations role hierarchy): Read/Write
+  - All non-clinical profiles: No Access
+  - Sharing rules: role-based only, no manual sharing
+
+Never open Diagnosis or Medication OWD to Public Read Only or Public Read/Write.
+
+
+1.5 Custom Metadata Types for Configuration
+
+Use Custom Metadata Types for any configuration value that varies by environment
+or is referenced by Apex code. Never hardcode queue IDs, thresholds, routing rules,
+or endpoint URLs directly in Apex or Flow.
+
+Current custom metadata types:
+  - ReferralRoutingConfig__mdt   specialty-to-queue routing rules
+  - OutreachCampaignConfig__mdt  outreach campaign thresholds and cadences
+  - IntegrationEndpoint__mdt     external system endpoint configuration
+
+
+1.6 External IDs
+
+Use External ID fields as the authoritative identifier for integration upserts and
+data loads. They enable idempotent operations and prevent duplicate record creation.
+
+Current External ID fields:
+  - Patient__c.MRN__c              Medical Record Number (required by trigger, unique)
+  - Provider__c.NPI__c             National Provider Identifier (10-digit, unique)
+  - PriorAuthorization__c.AuthorizationNumber__c   Unique authorization number
+
+Never update an External ID field on an existing record. It is the identity key
+for that record across all connected systems.
+
+
+================================================================================
+2. APEX DEVELOPMENT BEST PRACTICES
+================================================================================
+
+2.1 Trigger Architecture
+
+All triggers follow the One Trigger Per Object / Handler Class pattern. This is
+mandatory for all new triggers.
+
+  - One trigger per object, dispatches to a single handler class
+  - Trigger file contains only the dispatch call -- no business logic
+  - Handler class contains all logic in named methods:
+      handleBeforeInsert(), handleAfterInsert(), handleBeforeUpdate(), handleAfterUpdate()
+  - Every handler class implements a static Boolean recursion guard
+
+Recursion guard pattern (required in every handler):
+
+    public class PatientTriggerHandler {
+        private static Boolean isExecuting = false;
+
+        public static void handleAfterUpdate(List<Patient__c> newList, Map<Id, Patient__c> oldMap) {
+            if (isExecuting) return;
+            isExecuting = true;
+            try {
+                // logic here
+            } finally {
+                isExecuting = false;
+            }
+        }
+    }
+
+Recursion guards prevent infinite loops when cross-object trigger chains cause
+a record to be updated more than once in a transaction (e.g., Patient risk
+escalation creates an OutreachActivity, which fires its own trigger).
+
+
+2.2 Bulkification
+
+Every Apex method that processes a collection of records must bulkify all SOQL
+queries. Never query inside a loop. A single transaction may process up to 200
+records; a query-per-record pattern exhausts the 100 SOQL governor limit before
+reaching that ceiling.
+
+Correct pattern -- collect IDs, query once, build a map, then iterate:
+
+    Set<Id> patientIds = new Set<Id>();
+    for (OutreachActivity__c oa : newRecords) {
+        if (oa.Patient__c != null) patientIds.add(oa.Patient__c);
+    }
+
+    Map<Id, List<QualityMeasure__c>> byPatient = new Map<Id, List<QualityMeasure__c>>();
+    for (QualityMeasure__c qm : [SELECT Id, Patient__c FROM QualityMeasure__c
+                                  WHERE Patient__c IN :patientIds]) {
+        if (!byPatient.containsKey(qm.Patient__c))
+            byPatient.put(qm.Patient__c, new List<QualityMeasure__c>());
+        byPatient.get(qm.Patient__c).add(qm);
+    }
+
+    for (OutreachActivity__c oa : newRecords) {
+        List<QualityMeasure__c> measures = byPatient.get(oa.Patient__c);
+        // process
+    }
+
+The same rule applies to DML. Never call insert, update, or delete inside a loop.
+Collect records into a list and execute a single DML statement after the loop.
+
+
+2.3 Setup Object Isolation (MIXED_DML)
+
+Never query setup objects (User, Profile, PermissionSet, etc.) in the same
+transaction as non-setup DML. This causes a MIXED_DML_OPERATION exception.
+
+For the running user's information, always use the UserInfo class methods:
+  - UserInfo.getUserId()
+  - UserInfo.getUserEmail()
+  - UserInfo.getName()
+
+Never query [SELECT Id FROM User WHERE Id = :UserInfo.getUserId()]. The query is
+redundant and introduces MIXED_DML risk.
+
+If user data beyond UserInfo is genuinely needed in a trigger context, retrieve it
+in a @future or Queueable method that runs after the triggering transaction commits.
+
+
+2.4 Formula Fields vs. Trigger Calculations
+
+Use a formula field whenever a field value is derived entirely from other fields
+on the same record. Trigger-calculated fields go stale if source fields are updated
+after the initial save.
+
+Formula fields are the correct approach for:
+  - Derived amounts (e.g., BilledAmount - AllowedAmount)
+  - Day calculations (e.g., ExpirationDate - TODAY())
+  - Status labels derived from other field combinations
+
+Use trigger calculation only when the derived value requires data from other objects
+(which a formula cannot access) or complex conditional logic.
+
+
+2.5 Utility Class Caching
+
+Utility methods that query the database and may be called multiple times within a
+single transaction must implement transaction-scoped static caching.
+
+    private static Map<Id, Provider__c> providerCache;
+
+    public static Map<Id, Provider__c> getProviderMap(Set<Id> ids) {
+        if (providerCache == null) providerCache = new Map<Id, Provider__c>();
+        Set<Id> uncached = new Set<Id>();
+        for (Id id : ids) if (!providerCache.containsKey(id)) uncached.add(id);
+        if (!uncached.isEmpty()) {
+            providerCache.putAll(new Map<Id, Provider__c>(
+                [SELECT Id, Name, Specialty__c, NetworkStatus__c, NPI__c,
+                        CredentialingStatus__c
+                 FROM Provider__c WHERE Id IN :uncached]));
+        }
+        Map<Id, Provider__c> result = new Map<Id, Provider__c>();
+        for (Id id : ids) if (providerCache.containsKey(id)) result.put(id, providerCache.get(id));
+        return result;
+    }
+
+
+2.6 Async Processing
+
+Use the correct async mechanism for the job:
+
+  Queueable Apex     Process a single record or small set asynchronously. Supports
+                     chaining and is the preferred replacement for @future methods.
+  Batch Apex         Process large volumes (1,000+ records). Chunked automatically.
+                     Use for scheduled data normalization or expiration jobs.
+  Scheduled Apex     Recurring jobs: daily expiration checks, weekly reports.
+  @future            Do not use for new code. Use Queueable instead -- better error
+                     handling, chainable, and not subject to callout ordering issues.
+
+
+2.7 Apex Sharing
+
+  with sharing      Required on all @AuraEnabled controllers and any class invoked
+                    directly from LWC or Aura. Enforces OWD and sharing rules.
+  without sharing   Permitted only in batch and scheduled contexts where system-level
+                    access is required. Must be documented with a comment explaining why.
+  inherited sharing Never use. Sharing behavior is unpredictable and context-dependent.
+
+
+================================================================================
+3. TEST COVERAGE STANDARDS
+================================================================================
+
+3.1 Coverage Requirements
+
+  - Minimum org-wide coverage: 80% (Salesforce deployment requirement)
+  - Per-class minimum: 85% (Meridian standard)
+  - Every new Apex class must ship with a test class in the same deployment
+  - Batch classes must test start(), execute(), and finish()
+  - Trigger handlers must cover: happy path, validation failures, bulk (200 records),
+    and all status transition scenarios
+
+
+3.2 What to Test in Every Trigger Handler
+
+  Before Insert   Required fields are validated, defaults are set correctly
+  After Insert    Related records are created (Tasks, Cases, OutreachActivities)
+  Before Update   Status transitions are blocked where required; required fields
+                  are enforced on status change
+  After Update    Related records are updated; escalation logic fires correctly
+  Bulk (200)      Insert and update 200 records in a single DML call to verify
+                  no governor limit violations
+  Negative tests  Invalid input produces addError() or AuraHandledException,
+                  not an unhandled exception
+
+
+3.3 Test Data Standards
+
+  - Always use @TestSetup to create shared test data once per test class
+  - Never use SeeAllData=true -- always create test data explicitly
+  - Use a shared TestDataFactory class for record creation patterns used across
+    multiple test classes
+  - Test classes must not swallow exceptions with empty catch blocks
+
+
+================================================================================
+4. FLOWS & AUTOMATION BEST PRACTICES
+================================================================================
+
+4.1 Approved Automation Technologies
+
+Salesforce has retired Workflow Rules and Process Builder. Do not create new
+Workflow Rules or Process Builder processes. If an existing Workflow Rule or
+Process Builder is discovered in the org, migrate it to a Flow and deactivate
+the original.
+
+Approved automation technologies:
+  - Record-Triggered Flows (before-save and after-save)
+  - Scheduled Flows
+  - Screen Flows
+  - Apex Triggers (via handler class pattern)
+
+
+4.2 Choosing the Right Tool
+
+Before-Save Record-Triggered Flow:
+  Use for simple field updates on the triggering record only. Before-save flows
+  do not consume DML or SOQL governor limit headroom, run before Apex triggers,
+  and cannot create or update other records. Best for: defaults, field formatting,
+  same-record calculations.
+
+After-Save Record-Triggered Flow:
+  Use for creating or updating related records, sending notifications, or calling
+  subflows when the committed record ID is required. More expensive than before-save.
+  Avoid on objects that also have Apex triggers handling the same event.
+
+Scheduled Flow:
+  Use for time-based automation: expiration alerts, reminders, nightly syncs.
+  Runs outside any user transaction. Always runs in system context.
+
+Screen Flow:
+  Use for guided user experiences and multi-step data entry wizards.
+  Not appropriate for background automation.
+
+Apex Trigger:
+  Use when logic requires SOQL queries across multiple objects, complex
+  multi-branch logic, or explicit governor limit management. Always paired
+  with a handler class (see Section 2.1).
+
+Rule: Never deploy both a Flow and an Apex trigger on the same object for the
+same event. Pick one approach per object per event and own it fully.
+
+
+4.3 Order of Execution
+
+For a single record save, automation fires in this order:
+
+  1. Before-save record-triggered flows
+  2. Before Apex triggers
+  3. System validation (required fields, unique, format)
+  4. Duplicate rules
+  5. After Apex triggers
+  6. After-save record-triggered flows
+  7. Post-commit logic (email alerts, Queueable jobs)
+
+A before-save flow that sets a field value will be visible to the Apex
+before-trigger. An Apex after-trigger that creates a child record may trigger
+additional flows or triggers on that child -- always design with the full
+execution chain in mind.
+
+
+4.4 Before-Save vs. After-Save Decision Guide
+
+Use before-save when:
+  - Only updating fields on the record being saved
+  - No SOQL queries on other records are needed
+  - The record ID is not needed (it does not exist yet in before-save context)
+
+Use after-save when:
+  - Creating or updating a related record
+  - The saved record's ID is required
+  - Calling an external action or subflow that depends on a committed record
+
+
+4.5 Flow Bulkification
+
+Record-triggered flows process records in batches of 200. A Get Records,
+Create Records, or Update Records action inside a loop consumes governor
+limit headroom on each iteration, exactly like a query-in-loop in Apex.
+
+Rules:
+  - Never place a Get Records element inside a loop
+  - Never place a Create Records or Update Records element inside a loop when
+    processing a collection -- build a collection variable inside the loop
+    and execute a single DML action after the loop exits
+  - Use the Assignment element inside loops to accumulate records, then act
+    on the collection once
+
+
+4.6 Error Handling and Fault Paths
+
+Every flow element that performs DML (Create Records, Update Records,
+Delete Records) or an external callout must have a fault connector wired.
+A flow element without a fault connector rolls back the entire transaction
+on error and presents the user with a generic, unactionable error message.
+
+On fault paths:
+  - Store {!$Flow.FaultMessage} in a variable
+  - For user-facing flows: route to a screen that shows a clear error message
+  - For background flows: create a log record so the failure is visible in reports
+  - For critical clinical data flows: always log to a persistent object
+
+
+4.7 Run Context
+
+Record-triggered flows run in user context by default, respecting the running
+user's sharing rules, OWD, and FLS. If a flow must access records the running
+user cannot see, it must run in system context -- document this explicitly in
+the flow description with the reason.
+
+Scheduled flows always run in system context. Always include entry conditions on
+scheduled flows to scope them to the intended record set. Without entry conditions,
+a scheduled flow queries every record of that type.
+
+
+4.8 Flow Versioning
+
+Only one version of a flow can be active at a time. Old inactive versions
+accumulate and must be cleaned up.
+
+  - Delete all inactive versions after confirming a new version is stable
+    in production
+  - Never delete an active version
+  - Treat each version bump as a deployment: test in sandbox, deploy, confirm,
+    then delete old versions
+  - Each version must have version notes summarizing what changed
+
+
+4.9 Flow Descriptions (Required)
+
+Every flow must have its Description field populated before activation.
+A flow without a description will not be approved for production.
+
+Required description contents:
+  - What the flow does (one sentence)
+  - What object and event triggers it
+  - The ticket or request that created it
+  - Known dependencies or limitations
+  - If deprecated: what replaced it and when
+
+Example:
+  "Creates an initial OutreachActivity for patients when EnrollmentStatus__c
+  is set to Active on insert. After-save, record-triggered on Patient__c.
+  Created for MHP-1890. Depends on no other automation creating an outreach
+  activity on the same event for the same patient."
+
+
+4.10 Flow Naming Convention
+
+  Record-triggered (before-save)   {Object}_{Action}_BeforeSave
+                                    e.g., Patient_RiskDefaults_BeforeSave
+  Record-triggered (after-save)    {Object}_{ActionDescription}
+                                    e.g., Patient_EnrollmentWelcome
+  Scheduled                         {Object}_{ScheduledDescription}
+                                    e.g., PriorAuth_ExpirationReminder
+  Screen Flow                       {Object}_{ScreenDescription}
+                                    e.g., Lead_ConversionWizard
+  Subflow (shared/reusable)         Shared_{Description}
+                                    e.g., Shared_SendTaskNotification
+  Deprecated                        {OriginalName}_DEPRECATED
+                                    e.g., Opportunity_Stage_Sync_DEPRECATED
+
+
+================================================================================
+5. VALIDATION RULES
+================================================================================
+
+5.1 Single Enforcement Point
+
+Every data validation rule must be enforced in exactly one place -- either a
+validation rule or an Apex trigger, never both. Dual enforcement produces
+duplicate error messages and requires logic to be maintained in two places.
+
+Use a validation rule when:
+  - The condition is fully expressible as a formula
+  - No SOQL query on related records is needed
+  - The rule should be visible and editable by admins without a code deployment
+
+Use an Apex trigger when:
+  - The condition requires querying related records
+  - The enforcement behavior depends on the running user's profile
+  - The logic is too complex for a formula
+
+
+5.2 Validation Rule Standards
+
+  - Every validation rule must have its Description field populated (see Section 10)
+  - Error messages must be specific and actionable -- tell the user exactly what
+    to do to resolve the error, not just what went wrong
+  - Errors must be displayed on the relevant field (errorDisplayField), not just
+    at the top of the page
+  - Validation rules that duplicate trigger logic must be consolidated to one
+    enforcement point
+
+
+5.3 Validation Rules in This Org
+
+Object                    Rule Name                            Enforcement
+Patient__c                Patient_CriticalRisk_NeedsCarePlan   Critical risk requires active care plan
+Patient__c                Patient_DOB_NotFuture                 Date of Birth cannot be in the future
+Opportunity               Opportunity_ACV_Required_When_Closed  ACV required on Closed Won
+Opportunity               OpportunityCloseDate_Required         Future close date required on new records
+Opportunity               OpportunityCloseDate_CanBePast        Pre-2020 dates allowed for historical Closed opps
+PriorAuthorization__c     Auth_DenialReason_Required            Denial Reason required when Status = Denied
+Referral__c               Referral_DueDate_Required             Due Date required when Status = Sent
+Referral__c               Referral_CompletedDate_Required       Completed Date required when Status = Completed
+
+
+================================================================================
+6. SECURITY & SHARING MODEL
+================================================================================
+
+6.1 Profiles vs. Permission Sets
+
+Profiles define the minimum baseline access for a user type. Permission sets
+grant additional access on top of the profile. Never expand access via a profile
+when a permission set can do the job. Do not create custom profiles -- use the
+standard Salesforce profiles as baselines and layer permission sets for all
+role-specific access.
+
+Permission sets in this org:
+  Meridian_Care_Manager          Full CRUD (no delete) on clinical objects
+  Meridian_Billing_Specialist    Full CRUD (no delete) on billing and claims objects
+  Meridian_Provider_Relations    Full CRUD (no delete) on provider network objects
+  Meridian_Full_Access           Full read/edit on all Meridian custom fields
+  Meridian_SysAdmin_Interview_App Full CRUD on InterviewResponse__c
+
+
+6.2 Role Hierarchy
+
+The role hierarchy determines record visibility when OWD is set to Private or
+Public Read Only. Users higher in the hierarchy can see records owned by users
+below them.
+
+Role structure:
+  CEO
+    IT_Director
+      Salesforce_Administrator, Systems_Analyst
+    VP_of_Clinical_Operations
+      Director_of_Care_Management
+        Care_Manager, Senior_Care_Manager
+      Director_of_Clinical_Programs
+        Clinical_Program_Manager
+    VP_of_Provider_Relations
+      Director_of_Contracting
+        Provider_Relations_Manager
+      Director_of_Credentialing
+        Credentialing_Specialist
+    VP_of_Revenue_Operations
+      Director_of_Billing
+        Billing_Specialist, Senior_Billing_Specialist
+      Director_of_Sales
+        Account_Executive, Senior_Account_Executive
+
+All active users must be assigned to the appropriate role. Roles without users
+result in sharing rules silently having no effect.
+
+
+6.3 Object-Level Security (OWD)
+
+Diagnosis__c             Private    Clinical hierarchy only
+Medication__c            Private    Clinical hierarchy only
+PriorAuthorization__c    Private    Care Managers, Billing, Clinical
+Claim__c                 Private    Billing, Operations
+Patient__c               Private    All internal users (read); clinical + care management (write)
+Referral__c              Private    Care Managers, Clinical (read/write); others read-only
+Provider__c              Public Read Only   All users
+ProviderCredential__c    Private    Provider Relations, Credentialing
+
+
+6.4 Field-Level Security (FLS)
+
+Every custom field deployed to production must have FLS explicitly configured
+for all relevant profiles. Fields without FLS are invisible in the UI even when
+the record is accessible.
+
+Every new field deployment must include:
+  1. FLS grants in FieldPermissions metadata for all relevant profiles
+  2. Placement on at least one page layout
+  3. Addition to relevant report types if the field will be used in reports
+
+
+6.5 Apex Sharing Keywords
+
+  with sharing      Required on all @AuraEnabled controllers and classes invoked
+                    from LWC or Aura. Enforces OWD and sharing rules.
+  without sharing   Permitted only in batch and scheduled Apex where system-level
+                    access is required. Document the reason in a code comment.
+  inherited sharing Never use. Sharing behavior becomes unpredictable and
+                    context-dependent.
+
+
+================================================================================
+7. GOVERNOR LIMITS & PERFORMANCE
+================================================================================
+
+7.1 Per-Transaction Limits
+
+SOQL queries:        100 synchronous / 200 asynchronous
+SOQL rows returned:  50,000 per transaction
+DML statements:      150 per transaction
+DML rows:            10,000 per transaction
+CPU time:            10,000ms synchronous / 60,000ms asynchronous
+Heap size:           6MB synchronous / 12MB asynchronous
+Callouts:            100 per transaction
+
+Use LIMIT clauses on all queries that could return large data sets. Use selective
+queries (filtered on indexed fields) on objects with large volumes such as
+OutreachActivity__c and RiskAssessment__c.
+
+Use Database.insert(records, false) for partial-success DML in batch jobs where
+some records failing should not roll back the entire batch.
+
+
+7.2 Designing Around Limits
+
+  - Never query or DML inside a loop (see Section 2.2)
+  - Move heavy processing to Queueable or Batch Apex to use the async limits
+  - Avoid loading full object graphs into heap -- select only the fields needed
+  - Use aggregate queries (COUNT, SUM, GROUP BY) instead of loading and counting
+    records in Apex
+  - For large data volumes, use SOQL for loops:
+      for (List<Patient__c> batch : [SELECT Id FROM Patient__c WHERE ...]) { }
+    This streams records in chunks of 200 and avoids heap limits
+
+
+================================================================================
+8. PLATFORM HYGIENE
+================================================================================
+
+8.1 Page Layouts
+
+Every custom field must appear on at least one page layout before a deployment
+is considered complete. Fields absent from layouts cause support confusion even
+when the data is present.
+
+  - Group custom fields into logical sections with clear headings
+  - Place required fields above the fold
+  - Use Lightning Record Pages with dynamic forms for all new objects
+  - Assign page layouts to record types explicitly -- never rely on the Master
+    layout as the only layout
+
+
+8.2 Report Types
+
+When a new field is added to an object that is used in custom report types, the
+field must be manually added to those report types. This does not happen
+automatically.
+
+Key report types to maintain:
+  Patient with Risk Assessments           Patient__c -> RiskAssessment__c
+  Patient with Outreach Activity          Patient__c -> OutreachActivity__c
+  Referral with Prior Authorization       Referral__c -> PriorAuthorization__c
+  Provider with Credentials               Provider__c -> ProviderCredential__c
+  Patient with Care Plan and Team         Patient__c -> CarePlan__c -> CareTeamMember__c
+  Prior Authorization with Claims         PriorAuthorization__c -> Claim__c
+
+
+8.3 Flow and Automation Hygiene
+
+  - No flow may remain in Draft status in production -- either activate it or delete it
+  - Delete inactive flow versions after confirming the active version is stable
+  - Every active flow must have a description (see Section 4.9)
+  - Deprecated flows must be marked {OriginalName}_DEPRECATED and documented with
+    what replaced them
+  - Review all inactive flows during quarterly cleanup sprints and delete those
+    with no future use
+
+
+8.4 Code Hygiene
+
+  - Remove dead code before deploying -- wrapper methods that only call another
+    method, empty TODO branches in batch classes, placeholder loops with no logic
+  - @future methods must be replaced with Queueable Apex equivalents
+  - Every deployed Apex class must have a corresponding test class
+  - Test classes must not swallow exceptions with empty catch blocks
+
+
+================================================================================
+9. DEPLOYMENT & RELEASE MANAGEMENT
+================================================================================
+
+9.1 Sandbox Strategy
+
+AsokaDev (Developer Pro)   Primary development sandbox. All changes deploy here first.
+asokatest                  Integration and QA sandbox. Used for user acceptance testing
+                           and when AsokaDev is unavailable.
+Production                 Sysadmin approval required for all deployments.
+
+
+9.2 Deployment Checklist
+
+Every deployment to production must satisfy all of the following:
+
+  - All Apex classes in the deployment have >= 85% test coverage
+  - Every new Apex class ships with a test class in the same deployment package
+  - All validation rules have been tested in sandbox against pass and fail scenarios
+  - All new fields have FLS configured for relevant profiles
+  - All new fields appear on at least one page layout
+  - All flows being deployed are Active (not Draft)
+  - No new flow duplicates automation already handled by an Apex trigger on the
+    same object and event
+  - All deployed artifacts have descriptions populated (see Section 10)
+  - Sysadmin has reviewed and approved in AsokaDev before production deploy
+
+
+9.3 Validation Rule Deployment
+
+Validation rules are best deployed through Setup > Object Manager when Metadata
+API deployment is unreliable. If deploying via Salesforce CLI, use the
+--target-org flag pointing to a fully authenticated org. Always verify in the
+target org's Setup that the rule is active after deployment.
+
+
+================================================================================
+10. NAMING CONVENTIONS & DESCRIPTION REQUIREMENTS
+================================================================================
+
+10.1 Naming Conventions
+
+  Artifact                      Convention                          Example
+  -------------------------------------------------------------------------
+  Custom Objects                PascalCase + __c                    Patient__c
+  Custom Fields                 PascalCase + __c                    RiskLevel__c
+  Custom Metadata Types         PascalCase + __mdt                  ReferralRoutingConfig__mdt
+  Custom Settings               PascalCase + __c                    OrgConfig__c
+  Permission Sets               Meridian_{Role}                     Meridian_Care_Manager
+  Apex Trigger Handlers         {Object}TriggerHandler              PatientTriggerHandler
+  Apex Batch Classes            {Object}{Description}Batch          PriorAuthExpirationBatch
+  Apex Scheduled Classes        {Object}{Description}Scheduler      PriorAuthExpirationScheduler
+  Apex Utility Classes          Meridian{Description}               MeridianUtils
+  Apex Test Classes             {ClassUnderTest}Test                PatientTriggerTest
+  Triggers                      {Object}Trigger                     PatientTrigger
+  Flow (after-save)             {Object}_{ActionDescription}        Patient_EnrollmentWelcome
+  Flow (before-save)            {Object}_{Action}_BeforeSave        Patient_RiskDefaults_BeforeSave
+  Flow (scheduled)              {Object}_{ScheduledDescription}     PriorAuth_ExpirationReminder
+  Flow (screen)                 {Object}_{ScreenDescription}        Lead_ConversionWizard
+  Flow (subflow)                Shared_{Description}                Shared_SendTaskNotification
+  Flow (deprecated)             {OriginalName}_DEPRECATED           Opportunity_Stage_Sync_DEPRECATED
+  Validation Rules              {Object}_{Description}              Auth_DenialReason_Required
+  LWC Components                camelCase, no underscores           mhpFauxJira
+  Aura Components               camelCase, no underscores           meridianInterviewWrapper
+  Report Types                  {Primary} with {Related}            Patient with Risk Assessments
+  Queues                        {Specialty/Function}_Queue          Cardiology_Queue
+
+
+10.2 Description Requirements
+
+Every org artifact must have its Description field fully populated before
+deployment or activation. A blank description is not acceptable.
+
+This requirement applies to:
+  - Flows (flow-level description and version-level notes on each version)
+  - Apex classes (file-level comment block at the top of each class)
+  - Apex triggers (comment block at the top of the trigger file)
+  - Validation rules (Description field in Object Manager)
+  - Custom objects (Description field in Object Manager)
+  - Custom fields (Description field and Help Text in Object Manager)
+  - Permission sets (Description field)
+  - Custom metadata types and individual records
+  - Reports and dashboards (Description field)
+  - Record types (Description field)
+  - Queues (Description field)
+
+
+10.3 What a Good Description Contains
+
+Every description must answer: what does this do, why does it exist, and what
+should someone know before changing it.
+
+For Flows:
+  - What it does (one sentence)
+  - What triggers it (object, event, entry conditions)
+  - Which ticket or request created it
+  - Known dependencies, limitations, or risks
+
+  Example:
+    "Creates an initial OutreachActivity (Phone, Initial enrollment call needed)
+    for patients when EnrollmentStatus__c is set to Active on insert. After-save
+    record-triggered on Patient__c insert. Created for MHP-1890. Requires that no
+    other automation creates an OutreachActivity for the same patient on insert."
+
+For Apex Classes:
+  - Purpose of the class
+  - Which trigger or context invokes it
+  - Known limitations or dependencies
+
+  Example:
+    "Trigger handler for Patient__c. Manages enrollment defaults, risk assessment
+    auto-creation, outreach activity creation, risk escalation logic, and deceased
+    consent revocation. Invoked by PatientTrigger on all before/after insert and
+    update events."
+
+For Validation Rules:
+  - What condition is being enforced
+  - Why the rule exists (business reason or compliance requirement)
+  - Whether the same rule is enforced elsewhere
+
+  Example:
+    "Requires DenialReason__c to be populated when Status is set to Denied.
+    Supports compliance reporting and member appeals tracking per NCQA guidelines."
+
+For Custom Fields:
+  - What the field represents
+  - How it is populated (manual, trigger, flow, formula, integration)
+  - What depends on it (reports, validation rules, triggers)
+
+  Example Help Text:
+    "Set automatically by PatientTriggerHandler when RiskLevel changes to High
+    or Critical. Do not edit manually. Read by the High-Risk Outreach campaign
+    flow and the Monthly Risk Escalation report."
+
+
+10.4 Enforcement
+
+Deployments that include artifacts with blank descriptions must be returned for
+completion before approval. During quarterly cleanup sprints, audit for blank
+descriptions using Setup search and the metadata tooling available in the org.
+
+
+================================================================================
+11. PERMISSION SETS
+================================================================================
+
+11.1 Permission Set Model
+
+Use permission sets as the primary mechanism for granting object and field access.
+Profiles provide the minimum baseline; permission sets stack additional capabilities
+on top. Never create custom profiles -- use standard profiles as baselines.
+
+New permission sets must follow the Meridian_{Role} naming pattern and must have
+a Description field populated explaining the intended user audience and what
+access is granted.
+
+
+11.2 Integration Permission Sets
+
+The connected app used by Asoka authenticates via an integration user with a
+dedicated permission set. Auto-number and system-generated identifier fields
+(such as ReferralNumber__c and ClaimNumber__c) must be read-only in the
+integration permission set. External systems must never overwrite system-generated
+identifiers.
+
+When adding new auto-number fields, explicitly set them to read-only in all
+integration permission sets.
+
+
+================================================================================
+12. RECORD TYPES
+================================================================================
+
+12.1 When to Use Record Types
+
+Use record types when different user segments need meaningfully different page
+layouts, picklist values, or business processes on the same object. Do not create
+record types for cosmetic UI differences -- use dynamic forms with conditional
+component visibility instead.
+
+Record types in this org:
+
+Opportunity (Meridian Sales Process):
+  Meridian New Business    net-new revenue from a new account
+  Meridian Renewal         contract renewal from an existing customer
+  Meridian Upsell          expansion of an existing contract
+
+Patient__c:
+  Commercial, Medicaid, Medicare, Uninsured
+
+
+12.2 Record Type Management
+
+  - Every record type must be assigned to a page layout for every relevant profile
+  - Required fields on a layout must match the context of that record type
+  - When a new picklist value is added, assign it explicitly to the appropriate
+    record types -- a value not assigned to a record type is invisible to users
+    of that record type even if the data contains it
+  - When adding automation, always consider whether it should apply to all record
+    types or be scoped to specific ones
+
+
+================================================================================
+13. PICKLIST HYGIENE
+================================================================================
+
+13.1 Keep Definitions in Sync with Data
+
+Ghost picklist values -- values that exist in records but are no longer in the
+picklist definition -- cause filters, reports, and validation rules to silently
+miss records. Prevent this by treating picklist definition changes as a data
+migration, not just a metadata change.
+
+Before removing or renaming a picklist value:
+  1. Query the count of records currently using that value
+  2. Decide on the replacement value
+  3. Mass-update all affected records using the Setup Picklist Replace function
+  4. Verify no Apex, Flow, or validation rule formula references the old value
+  5. Deactivate (do not delete) the value, then delete after a validation period
+
+Before adding a picklist value:
+  1. Assign it to the appropriate record types
+  2. Update any automation that branches on picklist values to handle the new case
+
+
+13.2 State and Country Picklists
+
+BillingState and BillingCountry on Account should be controlled by the Salesforce
+State and Country Picklist feature, not free text. Free-text address fields produce
+inconsistent values and prevent reliable geographic reporting. Enable State and
+Country Picklists at the org level and run a data migration to normalize existing
+values before activating.
+
+
+13.3 Picklist API Value Casing
+
+All custom object picklist API values use PascalCase without spaces
+(e.g., MedicallyUnnecessary, InNetwork, OutPatient). Standard object and
+Loss_Reason__c picklist values use spaces (e.g., Lost to Competitor). When
+referencing picklist values in Apex or Flow, always use the API value, not the
+display label.
+
+
+================================================================================
+14. EXTERNAL IDs & API DATA PATTERNS
+================================================================================
+
+14.1 External ID Usage
+
+External ID fields enable idempotent upsert operations from integrations and data
+loads. Always use the designated External ID field as the upsert key when loading
+records from external systems. This prevents duplicate creation when the same data
+is loaded more than once.
+
+  - Patient__c.MRN__c           use as upsert key for patient data loads
+  - Provider__c.NPI__c          use as upsert key for provider data loads
+  - PriorAuthorization__c.AuthorizationNumber__c   use for authorization upserts
+
+Never update an External ID field on an existing record. It is the stable identity
+key used by all integrated systems.
+
+
+14.2 API Validation Bypass
+
+Salesforce validation rules fire on API DML by default. However, data loaded via
+Apex running in system mode without sharing, or via Bulk API in certain
+configurations, may bypass validation. As a result, historical records may not
+conform to validation rules that were added after those records were created.
+
+Never assume that a validation rule guarantees clean historical data. Always query
+to verify field completeness on existing records before building automation or
+reports that assume a field is always populated.
+
+Any bulk data load that intentionally bypasses a validation rule must be documented
+in a ticket, and a follow-up task must be created to backfill the affected records
+into compliance.
+
+
+================================================================================
+15. CONNECTED APP & INTEGRATION SECURITY
+================================================================================
+
+15.1 Connected App Standards
+
+  - Every external system integration must use its own dedicated connected app
+  - Never share OAuth credentials or connected apps between two different systems
+  - Grant only the minimum permissions required via a dedicated integration
+    permission set -- never assign System Administrator profile to an integration user
+  - Integration users should be licensed as Integration users, not full Salesforce
+    licenses
+  - Revoke OAuth tokens immediately for decommissioned integrations
+  - Audit active connected apps and issued tokens during quarterly security reviews
+
+
+15.2 Named Credentials for Outbound Callouts
+
+All outbound HTTP callouts from Apex must use Named Credentials rather than
+hardcoded endpoint URLs. Named Credentials handle OAuth token refresh automatically,
+keep credentials out of code, and make endpoint changes a configuration update
+rather than a code deployment.
+
+Even when IntegrationEndpoint__mdt provides the base URL, the callout itself must
+reference a Named Credential. Do not construct callout URLs from concatenated
+strings of hardcoded values.
+
+
+================================================================================
+16. CHANGE IMPACT ANALYSIS
+================================================================================
+
+Before making any structural change to the org, evaluate downstream impact.
+The following types of changes carry high risk and require explicit review:
+
+Picklist value changes:
+  Any rename or removal of a picklist value may break Apex trigger conditions,
+  Flow decision branches, validation rule formulas, and reports that filter on
+  that value. Query all references before proceeding.
+
+Object or field deletion:
+  Deleting a custom field permanently destroys its data. Deleting a custom object
+  destroys all records. Always confirm no Apex, Flow, report, or integration
+  references the field or object before deletion.
+
+OWD or sharing rule changes:
+  Tightening OWD removes record access immediately for all affected users with
+  no warning. Loosening OWD can expose PHI to users who should not have access.
+  Test sharing model changes in a full-copy sandbox before applying to production.
+
+Role hierarchy changes:
+  Moving or removing a role changes which records users at that role can see.
+  Verify impact on sharing rules and report subscriptions.
+
+Removing a picklist value from a record type:
+  Users of that record type lose the ability to set that value, but existing
+  records retain it as a ghost value. Always migrate existing records before
+  removing a value from a record type assignment.
+
+Apex class or trigger deletion:
+  Verify no other class calls the class being deleted. Use IDE search or the
+  Salesforce CLI dependency API before removing any class.
+
+
+16.1 Pre-Change Checklist
+
+  1. Query the count of records affected by the change
+  2. Search all Apex classes for hardcoded references to the value or field name
+  3. Review all active Flows for references
+  4. Review all active Validation Rules for formula references
+  5. Check Reports and Dashboards that filter on the field
+  6. Test the change in sandbox with representative data
+  7. Document the change in the relevant ticket before deploying
+
+
+================================================================================
+17. WORKING WITH ASOKA AI
+================================================================================
+
+17.1 What Asoka Handles
+
+  - Deploying new Apex classes and test classes from a specification
+  - Querying org data and exporting results to structured formats
+  - Bulk data operations (close, update, archive) with audit reports before executing
+  - Identifying data quality and code quality issues
+  - Iterating on deployments based on feedback
+
+Every Asoka deployment must include:
+  - A test class for any new Apex class, in the same deployment package
+  - FLS metadata for any new fields
+  - Page layout additions for any new fields
+  - Populated Description fields on all artifacts (see Section 10)
+
+
+17.2 Standard Questions to Answer Before Submitting a Request
+
+Answering these upfront prevents unnecessary back-and-forth:
+
+  - Which profiles or roles should have access to the new feature?
+  - Should new fields appear on a page layout? Which one?
+  - What is the notification mechanism -- Task, Email, or Chatter?
+  - Should automation apply to all records or a specific subset?
+  - What status conditions gate the automation (if any)?
+  - Should automation fire on create, update, or both?
+  - What should happen if an expected related record (e.g., Care Manager) is missing?
+  - Should the change apply to all record types or specific ones?
+
+
+================================================================================
+Meridian Health Partners -- Salesforce Best Practices v2.0 -- April 2026
+Internal Use Only
+================================================================================
