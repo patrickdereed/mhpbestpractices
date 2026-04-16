@@ -1,6 +1,6 @@
 MERIDIAN HEALTH PARTNERS
 Salesforce Best Practices & Architecture Standards
-Version 2.0 - April 2026
+Version 2.02 - April 2026
 ================================================================================
 
 
@@ -61,7 +61,7 @@ Diagnosis__c and Medication__c contain PHI and must be configured as follows:
 Never open Diagnosis or Medication OWD to Public Read Only or Public Read/Write.
 
 
-1.5 Custom Metadata Types for Configuration
+1.5 Custom Metadata Types (.mdt) for Configuration
 
 Use Custom Metadata Types for any configuration value that varies by environment
 or is referenced by Apex code. Never hardcode queue IDs, thresholds, routing rules,
@@ -265,6 +265,47 @@ Use the correct async mechanism for the job:
   - Use a shared TestDataFactory class for record creation patterns used across
     multiple test classes
   - Test classes must not swallow exceptions with empty catch blocks
+
+
+3.4 Exception Testing Pattern
+
+When testing that a method throws an exception, always place System.assert(false)
+immediately after the method call inside the try block. This guarantees the test
+fails if no exception is thrown, rather than silently passing with 0% coverage
+on the catch block.
+
+  CORRECT:
+    @IsTest
+    static void testMethod_throwsOnInvalidInput() {
+        try {
+            MyClass.methodUnderTest(null);
+            System.assert(false, 'Expected exception — should not reach this line');
+        } catch (AuraHandledException e) {
+            System.assertNotEquals(null, e.getMessage());
+        }
+    }
+
+  INCORRECT — test passes silently even if no exception is thrown:
+    @IsTest
+    static void testMethod_throwsOnInvalidInput() {
+        Boolean caughtException = false;
+        try {
+            MyClass.methodUnderTest(null);
+        } catch (AuraHandledException e) {
+            caughtException = true;
+        }
+        System.assert(caughtException, 'Expected exception');  // passes vacuously if no throw
+    }
+
+The boolean flag pattern is unreliable because if the method under test never
+throws, the catch block is never entered, caughtException stays false, and
+System.assert(false) at the end would fail — but only if the developer remembers
+to add it. The System.assert(false) inside the try block makes the failure
+unconditional and obvious.
+
+When triggering exceptions in @AuraEnabled methods, prefer inputs that cause a
+guaranteed DML failure (e.g. null value on a required field) over field-length
+overflows, which depend on the field's max-length configuration in the org.
 
 
 ================================================================================
@@ -539,6 +580,24 @@ Patient__c               Private    All internal users (read); clinical + care m
 Referral__c              Private    Care Managers, Clinical (read/write); others read-only
 Provider__c              Public Read Only   All users
 ProviderCredential__c    Private    Provider Relations, Credentialing
+
+RULE — Role-Named Requests Must Use Sharing Rules, Not OWD Broadening:
+
+When a visibility or access request names a specific role, profile, or group
+(e.g. "Clinical Directors need to see Encounter records"), Asoka must resolve
+the request using a role-based or criteria-based sharing rule ONLY. Asoka must
+NOT present loosening OWD (e.g. Public Read Only or Public Read/Write) as an
+option, even framed as "the simplest fix."
+
+Broadening OWD grants access to ALL internal users, which:
+  - Violates least-privilege access principles
+  - May expose PHI or sensitive records to unauthorized users
+  - Cannot be scoped to a specific role or group
+
+Correct response pattern when a named role needs access to a Private object:
+  1. Create a sharing rule: role/subordinates of [Named Role] → Read or Read/Write
+  2. If criteria-based scoping is needed, define the rule criteria explicitly
+  Do NOT offer OWD change as Option 1, Option 2, or any option.
 
 
 6.4 Field-Level Security (FLS)
@@ -1048,6 +1107,6 @@ Answering these upfront prevents unnecessary back-and-forth:
   - Asoka puts all data requests into a Salesforce report if possible, csv for >2000 records 
 
 ================================================================================
-Meridian Health Partners -- Salesforce Best Practices v2.0 -- April 2026
+Meridian Health Partners -- Salesforce Best Practices v2.02 -- April 2026
 Internal Use Only
 ================================================================================
