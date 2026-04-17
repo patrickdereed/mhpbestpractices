@@ -1,6 +1,6 @@
 MERIDIAN HEALTH PARTNERS
 Salesforce Best Practices & Architecture Standards
-Version 2.04 - April 2026
+Version 2.05 - April 2026
 ================================================================================
 
 
@@ -1124,11 +1124,16 @@ Answering these upfront prevents unnecessary back-and-forth:
   - Which profiles or roles should have access to the new feature?
   - Should new fields appear on a page layout? Which one?
   - What is the notification mechanism -- Task, Email, or Chatter?
-  - If working with picklist fields, query the org for the field's active picklist
-    values and present the full list to the user before asking which value applies.
-    Never guess, infer, or suggest example values — always use the real values
-    retrieved from the org. The user cannot be expected to know or recall exact
-    API values; showing the full list is what lets them answer precisely.
+  - If working with picklist fields, query the field's picklist definition
+    (metadata) and present every active value to the user before asking which
+    value applies. Never guess, infer, or suggest example values.
+    IMPORTANT: "Active" means active in the picklist field definition — not
+    "present in current record data." A value that exists in the definition but
+    has never been set on any record is still active and must be included.
+    A value that appears in records but has been deactivated must not be included.
+    The source is always field metadata (e.g. PicklistValueInfo, object describe),
+    never a SOQL GROUP BY or data query. Whether a value appears in existing
+    data is irrelevant to whether it belongs in the list shown to the user.
   - Should automation apply to all records or a specific subset?
   - What status conditions gate the automation (if any)?
   - Should automation fire on create, update, or both?
@@ -1167,6 +1172,6 @@ See Section 14.3. Creating a class is a code deployment, not a data operation.
 If Asoka lacks a tool to do the load directly, escalation is the correct response. 
 
 ================================================================================
-Meridian Health Partners -- Salesforce Best Practices v2.04 -- April 2026
+Meridian Health Partners -- Salesforce Best Practices v2.05 -- April 2026
 Internal Use Only
 ================================================================================
