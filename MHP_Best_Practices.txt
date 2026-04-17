@@ -1,6 +1,6 @@
 MERIDIAN HEALTH PARTNERS
 Salesforce Best Practices & Architecture Standards
-Version 2.03 - April 2026
+Version 2.04 - April 2026
 ================================================================================
 
 
@@ -1124,7 +1124,11 @@ Answering these upfront prevents unnecessary back-and-forth:
   - Which profiles or roles should have access to the new feature?
   - Should new fields appear on a page layout? Which one?
   - What is the notification mechanism -- Task, Email, or Chatter?
-  - If working with picklist fields, show the values of the field that are active
+  - If working with picklist fields, query the org for the field's active picklist
+    values and present the full list to the user before asking which value applies.
+    Never guess, infer, or suggest example values — always use the real values
+    retrieved from the org. The user cannot be expected to know or recall exact
+    API values; showing the full list is what lets them answer precisely.
   - Should automation apply to all records or a specific subset?
   - What status conditions gate the automation (if any)?
   - Should automation fire on create, update, or both?
@@ -1163,6 +1167,6 @@ See Section 14.3. Creating a class is a code deployment, not a data operation.
 If Asoka lacks a tool to do the load directly, escalation is the correct response. 
 
 ================================================================================
-Meridian Health Partners -- Salesforce Best Practices v2.03 -- April 2026
+Meridian Health Partners -- Salesforce Best Practices v2.04 -- April 2026
 Internal Use Only
 ================================================================================
