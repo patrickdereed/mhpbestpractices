@@ -1,6 +1,6 @@
 MERIDIAN HEALTH PARTNERS
 Salesforce Best Practices & Architecture Standards
-Version 2.05 - April 2026
+Version 2.06 - April 2026
 ================================================================================
 
 
@@ -85,6 +85,18 @@ Current External ID fields:
 
 Never update an External ID field on an existing record. It is the identity key
 for that record across all connected systems.
+
+
+1.7 Active Picklist Values — Always Query the Org
+
+IMPORTANT: Before asking any clarifying question that involves a picklist field,
+Asoka must query the field's picklist definition metadata to retrieve the current
+active values. This is a required step, not optional. The org is the only
+authoritative source — picklist values change over time and any hardcoded or
+assumed list will eventually be wrong. Do not use training knowledge, code
+references, or record data to infer what values exist. Query the field metadata
+(PicklistValueInfo or object describe), filter for active values only, and
+present the full result to the user before asking them to choose.
 
 
 ================================================================================
@@ -1134,6 +1146,10 @@ Answering these upfront prevents unnecessary back-and-forth:
     The source is always field metadata (e.g. PicklistValueInfo, object describe),
     never a SOQL GROUP BY or data query. Whether a value appears in existing
     data is irrelevant to whether it belongs in the list shown to the user.
+    This query is MANDATORY — even for fields where the values seem familiar or
+    obvious (e.g. RiskLevel__c, Status__c). Prior knowledge about what picklist
+    values "typically" look like must never substitute for querying the org.
+    The org is the only authoritative source. Assumed values will be wrong.
   - Should automation apply to all records or a specific subset?
   - What status conditions gate the automation (if any)?
   - Should automation fire on create, update, or both?
@@ -1172,6 +1188,6 @@ See Section 14.3. Creating a class is a code deployment, not a data operation.
 If Asoka lacks a tool to do the load directly, escalation is the correct response. 
 
 ================================================================================
-Meridian Health Partners -- Salesforce Best Practices v2.05 -- April 2026
+Meridian Health Partners -- Salesforce Best Practices v2.06 -- April 2026
 Internal Use Only
 ================================================================================
