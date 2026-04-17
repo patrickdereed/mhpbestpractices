@@ -1,6 +1,6 @@
 MERIDIAN HEALTH PARTNERS
 Salesforce Best Practices & Architecture Standards
-Version 2.02 - April 2026
+Version 2.03 - April 2026
 ================================================================================
 
 
@@ -988,6 +988,39 @@ in a ticket, and a follow-up task must be created to backfill the affected recor
 into compliance.
 
 
+14.3 X-Class Prohibition — Never Create an Apex Class to Load Bespoke Data
+
+An X-class is any Apex class whose sole purpose is to execute a one-time DML
+operation (insert, update, delete) in order to load a specific dataset into an org.
+X-classes are prohibited from being created or deployed to production for any reason.
+
+Prohibited patterns:
+  - A Batch Apex class that hardcodes records to insert (e.g. ContactUploadBatch)
+  - Any class with a static run() or execute() method that inserts a specific
+    dataset and is intended to be invoked once via Anonymous Apex after deployment
+  - Any class created specifically to handle a data migration or one-time load
+    where the data values are encoded directly in the class body
+
+Why this is wrong:
+  - It leaves permanent code artifacts in the org after the load is complete
+  - It requires a test class to be written and deployed for non-reusable logic
+  - It conflates a metadata deployment with a data operation
+  - The class must later be identified and deleted, creating cleanup debt
+  - Dead code misleads future developers and inflates the org's code surface
+
+Correct pattern for all one-time data loads:
+  1. Prepare a clean CSV with correct field API names and External ID columns
+  2. Use Data Loader, Workbench, or the Salesforce Bulk API to insert or upsert
+  3. Validate results in the org after the load completes
+  4. No code is created, deployed, or deleted as part of a data operation
+
+If Asoka does not have a direct DML tool available to execute the load:
+  1. Prepare and validate the CSV (verify field API names, record types, lookups,
+     parent record existence, and any validation rules that will fire on insert)
+  2. Escalate to a human sysadmin with the clean CSV and explicit load instructions
+  3. Never compensate for a missing tool by creating a deployment artifact
+
+
 ================================================================================
 15. CONNECTED APP & INTEGRATION SECURITY
 ================================================================================
@@ -1104,9 +1137,32 @@ Answering these upfront prevents unnecessary back-and-forth:
   - Voice: speaks conversationally about Salesforce with stakeholders without extra technical jargon
   - Organizational security is the most important thing for Asoka
   - Asoka respects OWD and least-privilege access depending on the user it's interacting with
-  - Asoka puts all data requests into a Salesforce report if possible, csv for >2000 records 
+  - Asoka puts all data requests into a Salesforce report if possible, csv for >2000 records
+
+
+17.4 Data Load Requests
+
+When a user asks Asoka to insert, upsert, or bulk-update records from a CSV or
+pasted data, Asoka must follow this pattern:
+
+  1. Read and parse the data to identify which objects and fields are present
+  2. Ask the following clarification questions before acting:
+       - Which object(s) should records be inserted or upserted into?
+       - Should related records (e.g. Patient__c linked to Contact) also be loaded?
+       - If parent records are required (e.g. Account for Contact), should Asoka
+         insert them where they do not already exist?
+       - If records already exist, should the existing data be overwritten?
+  3. Validate the data against the org: check field API names, record type
+     developer names, lookup targets, and any validation rules that will fire
+  4. Use a direct DML tool (Data Loader, Bulk API, Workbench) to execute the load
+  5. If no direct DML tool is available, prepare the validated CSV and escalate
+     to a human sysadmin with explicit load instructions
+
+Asoka must NEVER create a bespoke Apex class (X-class) to handle a data load.
+See Section 14.3. Creating a class is a code deployment, not a data operation.
+If Asoka lacks a tool to do the load directly, escalation is the correct response. 
 
 ================================================================================
-Meridian Health Partners -- Salesforce Best Practices v2.02 -- April 2026
+Meridian Health Partners -- Salesforce Best Practices v2.03 -- April 2026
 Internal Use Only
 ================================================================================
